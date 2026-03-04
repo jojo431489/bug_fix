@@ -173,3 +173,91 @@ ALTER TABLE material_catalog ALTER COLUMN norm NVARCHAR(255);
 ```
 
 或執行 `2-2. COMPANY_WF.sql` 更新所有公司資料庫。
+
+---
+
+### 修正 6：SFT_BOMMF 資料庫欄位長度擴大
+
+**問題**：`upBomCROSS` 方法 INSERT 到 `SFT_BOMMF` 表時發生 Data truncation 錯誤。
+
+**檔案**：`SFT_web/sql/2-2. COMPANY_WF.sql`
+
+**注意**：MF001, MF002, MF003, MF006 是 PRIMARY KEY，不可修改。
+
+```sql
+-- SFT_BOMMF 非 PK 欄位擴大
+ALTER TABLE SFT_BOMMF ALTER COLUMN MF004 NVARCHAR(40);
+ALTER TABLE SFT_BOMMF ALTER COLUMN MF007 NVARCHAR(100);
+ALTER TABLE SFT_BOMMF ALTER COLUMN MF015 NVARCHAR(20);
+ALTER TABLE SFT_BOMMF ALTER COLUMN MF017 NVARCHAR(20);
+ALTER TABLE SFT_BOMMF ALTER COLUMN MF034 NVARCHAR(40);
+ALTER TABLE SFT_BOMMF ALTER COLUMN MF040 NVARCHAR(40);
+```
+
+| 欄位 | 原長度 | 新長度 | 備註 |
+|------|--------|--------|------|
+| MF004 | 10 | 40 | ✅ 非 PK |
+| MF007 | 40 | 100 | ✅ 非 PK |
+| MF015 | 4 | 20 | ✅ 非 PK |
+| MF017 | 6 | 20 | ✅ 非 PK |
+| MF034 | 10 | 40 | ✅ 非 PK |
+| MF040 | 15 | 40 | ✅ 非 PK |
+
+---
+
+### 修正 7：RegularESB.java - PRIMARY KEY 重複錯誤修正
+
+**問題**：`upItemCROSS` 方法在 INSERT `material_catalog` 時，若資料已存在會報 PRIMARY KEY 重複錯誤。
+
+**錯誤訊息**：
+```
+Violation of PRIMARY KEY constraint 'PK_material_catalog'.
+Cannot insert duplicate key in object 'dbo.material_catalog'.
+```
+
+**檔案**：`SFT_dataImport/src/com/dci/sft/sql/RegularESB.java`
+
+**解決方案**：將 INSERT 改為 MERGE 語句（原子操作）
+
+```java
+// 修改前：INSERT（會造成 PRIMARY KEY 重複錯誤）
+sql = " INSERT INTO material_catalog (material_id,material_name,norm,...) "
+    + " VALUES (:ID, :NAME, :DESCRIPTION, ...) ";
+
+// 修改後：MERGE（自動處理 INSERT 或 UPDATE）
+sql = " MERGE INTO material_catalog AS target "
+    + " USING (SELECT :ID AS material_id) AS source "
+    + " ON target.material_id = source.material_id "
+    + " WHEN MATCHED THEN "
+    + "   UPDATE SET material_name = :NAME, norm = :DESCRIPTION, ... "
+    + " WHEN NOT MATCHED THEN "
+    + "   INSERT (material_id, material_name, norm, ...) "
+    + "   VALUES (:ID, :NAME, :DESCRIPTION, ...); ";
+```
+
+**效果**：
+- 資料存在 → 自動 UPDATE
+- 資料不存在 → 自動 INSERT
+- **不會再報 PRIMARY KEY 重複 ERROR**
+
+---
+
+## 完整修改清單
+
+| # | 修正項目 | 檔案 |
+|---|---------|------|
+| 1 | 單引號跳脫處理 | RegularESB.java |
+| 2 | CROSS API 超時設定 | SendFormCross.java |
+| 3 | 詳細 LOG 記錄 | RegularESB.java |
+| 4 | WORKSTATION/material_catalog 欄位擴大 | 2-2. COMPANY_WF.sql |
+| 5 | SQL 欄位名稱修正 (ID→material_id) | RegularESB.java |
+| 6 | SFT_BOMMF 欄位擴大 | 2-2. COMPANY_WF.sql |
+| 7 | PRIMARY KEY 重複錯誤修正 (MERGE) | RegularESB.java |
+
+---
+
+## 版本同步
+
+所有修改已同步至：
+- **標準版**：`SFT_*` 模組
+- **亨利五金版**：`SFT_*_0000675600_1611` 模組
