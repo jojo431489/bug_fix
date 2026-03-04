@@ -205,39 +205,75 @@ ALTER TABLE SFT_BOMMF ALTER COLUMN MF040 NVARCHAR(40);
 
 ---
 
-### 修正 7：RegularESB.java - PRIMARY KEY 重複錯誤修正
+### 修正 7：RegularESB.java - PRIMARY KEY 重複錯誤修正 (UPDATE + INSERT + TRY-CATCH)
 
-**問題**：`upItemCROSS` 方法在 INSERT `material_catalog` 時，若資料已存在會報 PRIMARY KEY 重複錯誤。
+**問題**：`upItemCROSS` 方法在處理 `material_catalog` 時，同一批次 ERP 傳入重複品號會報 PRIMARY KEY 重複錯誤。
 
 **錯誤訊息**：
 ```
 Violation of PRIMARY KEY constraint 'PK_material_catalog'.
 Cannot insert duplicate key in object 'dbo.material_catalog'.
+The duplicate key value is (ZZ09-J01 ZN Yellow Cr+6 (????????)).
 ```
+
+**根因分析**：
+- ERP 同一批次傳入重複的品號（如 `ZZ09-J01 ZN Yellow Cr+6 (????????)` 出現兩次）
+- 原本使用 MERGE 語句，但在同批次重複資料時仍會報錯
+- 第一筆 MERGE 成功 INSERT，第二筆 MERGE 又嘗試 INSERT 導致 PK 衝突
 
 **檔案**：`SFT_dataImport/src/com/dci/sft/sql/RegularESB.java`
 
-**解決方案**：將 INSERT 改為 MERGE 語句（原子操作）
+**解決方案**：改用 UPDATE + INSERT + TRY-CATCH 模式
 
 ```java
-// 修改前：INSERT（會造成 PRIMARY KEY 重複錯誤）
-sql = " INSERT INTO material_catalog (material_id,material_name,norm,...) "
-    + " VALUES (:ID, :NAME, :DESCRIPTION, ...) ";
-
-// 修改後：MERGE（自動處理 INSERT 或 UPDATE）
+// 修改前：MERGE（同批次重複資料仍會報錯）
 sql = " MERGE INTO material_catalog AS target "
     + " USING (SELECT :ID AS material_id) AS source "
     + " ON target.material_id = source.material_id "
-    + " WHEN MATCHED THEN "
-    + "   UPDATE SET material_name = :NAME, norm = :DESCRIPTION, ... "
-    + " WHEN NOT MATCHED THEN "
-    + "   INSERT (material_id, material_name, norm, ...) "
-    + "   VALUES (:ID, :NAME, :DESCRIPTION, ...); ";
+    + " WHEN MATCHED THEN UPDATE SET ... "
+    + " WHEN NOT MATCHED THEN INSERT ... ";
+
+// 修改後：UPDATE + INSERT + TRY-CATCH
+// 1. 先嘗試 UPDATE
+String updateSql = " UPDATE material_catalog SET material_name = :NAME, "
+        + " norm = :DESCRIPTION, unit_no = :UNIT, "
+        + " ENABLED = :ENABLED, MODI_DATE = N'...' "
+        + " WHERE material_id = :ID ";
+int updateCount = conm.sqlUpdate(updateSql, con);
+
+// 2. 如果沒更新到任何記錄，嘗試 INSERT
+if (updateCount == 0) {
+    try {
+        String insertSql = " INSERT INTO material_catalog (...) VALUES (...) ";
+        conm.sqlUpdate(insertSql, con);
+    } catch (Exception insertEx) {
+        // 3. 如果 INSERT 報 PRIMARY KEY 錯誤（同批次重複），改用 UPDATE
+        if (insertEx.getMessage().contains("PRIMARY KEY")) {
+            logger.warn("[RegularESB][upItemCROSS][WARN] 品號已存在，改用UPDATE: " + currentItemNo);
+            conm.sqlUpdate(updateSql, con);
+        } else {
+            throw insertEx;
+        }
+    }
+}
+sql = ""; // 已處理完成，清空 sql 避免重複執行
+```
+
+**處理邏輯**：
+```
+同批次有重複資料時：
+第一筆: UPDATE (0筆) → INSERT (成功)
+第二筆: UPDATE (1筆) → 完成 (不會報錯)
+
+或者：
+第一筆: UPDATE (0筆) → INSERT (成功)
+第二筆: UPDATE (0筆) → INSERT (PK錯誤) → catch → UPDATE (成功)
 ```
 
 **效果**：
-- 資料存在 → 自動 UPDATE
-- 資料不存在 → 自動 INSERT
+- 資料存在 → UPDATE
+- 資料不存在 → INSERT
+- 同批次重複 → 第一筆 INSERT，後續 UPDATE
 - **不會再報 PRIMARY KEY 重複 ERROR**
 
 ---
@@ -252,7 +288,7 @@ sql = " MERGE INTO material_catalog AS target "
 | 4 | WORKSTATION/material_catalog 欄位擴大 | 2-2. COMPANY_WF.sql |
 | 5 | SQL 欄位名稱修正 (ID→material_id) | RegularESB.java |
 | 6 | SFT_BOMMF 欄位擴大 | 2-2. COMPANY_WF.sql |
-| 7 | PRIMARY KEY 重複錯誤修正 (MERGE) | RegularESB.java |
+| 7 | PRIMARY KEY 重複錯誤修正 (UPDATE+INSERT+TRY-CATCH) | RegularESB.java |
 
 ---
 
